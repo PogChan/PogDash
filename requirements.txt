@@ -4,3 +4,4 @@ pandas
 yfinance>=0.2.35
 numpy
 python-dateutil
+gunicorn
