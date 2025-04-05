@@ -1,4 +1,4 @@
-dash
+dash>=2.5
 dash-bootstrap-components
 pandas
 yfinance>=0.2.35
