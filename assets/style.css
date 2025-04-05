@@ -1,0 +1,38 @@
+/* assets/style.css */
+
+/* Global page background */
+body {
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  font-family: 'Open Sans', sans-serif;
+}
+
+/* Navbar brand style */
+.navbar-brand {
+  font-size: 1.8rem !important;
+  font-weight: 800 !important;
+}
+
+/* Hero section styling (on home page) */
+.hero-section {
+  background: #fff;
+  border-radius: 8px;
+}
+
+/* Card hover effect */
+.card:hover {
+  transform: translateY(-3px);
+  transition: 0.2s ease-in-out;
+}
+
+/* Adjust table cells a bit */
+table td, table th {
+  vertical-align: middle;
+}
+
+/* Example text styles */
+.text-primary {
+  color: #2d8fd5 !important;
+}
+.text-info {
+  color: #17a2b8 !important;
+}
