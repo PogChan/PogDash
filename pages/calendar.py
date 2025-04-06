@@ -7,132 +7,159 @@ import yfinance as yf
 import datetime
 import calendar
 from dateutil.relativedelta import relativedelta
+import calendar
 
 dash.register_page(__name__, path="/calendar", name="Calendar")
 
+# -----------------------------
+# Data Functions
+# -----------------------------
+
 def get_spy_data(start_date="2000-01-01"):
     data = yf.download("SPY", start=start_date)
-    # Use "Adj Close" if available; otherwise, use "Close"
+    # Calculate daily returns using the unadjusted "Close"
     data["Daily_Return"] = data["Close"].pct_change() * 100
     return data
 
 def filter_correction_periods(data, threshold=-15):
+    """
+    For each year-month group, if the minimum rolling 30-day return
+    in that month is below the threshold, exclude that entire month.
+    """
     data["Rolling_30_Return"] = data["Close"].pct_change(30) * 100
-    correction_starts = data[data["Rolling_30_Return"] < threshold].index
-    exclude_mask = pd.Series(False, index=data.index)
-    for start in correction_starts:
-        end = start + pd.DateOffset(months=3)
-        exclude_mask |= (data.index >= start) & (data.index <= end)
-    return data[~exclude_mask]
+
+    def filter_month(group):
+        if group["Rolling_30_Return"].min() < threshold:
+            return pd.DataFrame()  # drop the whole month
+        return group
+
+    filtered = data.groupby([data.index.year, data.index.month], group_keys=False).apply(filter_month)
+    return filtered
 
 def calculate_seasonality(data):
     data = data.copy()
     data["Month"] = data.index.month
-    data["Day"] = data.index.day
+    # For each year-month, assign a trading day number (starting at 1)
+    data["Trading_Day"] = data.groupby([data.index.year, data.index.month]).cumcount() + 1
 
-    stats = data.groupby(["Month", "Day"])["Daily_Return"].agg(["mean", "count"]).reset_index()
+    # Aggregate using median instead of mean
+    stats = data.groupby(["Month", "Trading_Day"])["Daily_Return"].agg(["median", "count"]).reset_index()
 
-    pos_counts = data[data["Daily_Return"] > 0].groupby(["Month", "Day"]).size().reset_index(name="pos_count")
-    stats = pd.merge(stats, pos_counts, on=["Month", "Day"], how="left")
+    # Calculate positive counts and merge them
+    pos_counts = data[data["Daily_Return"] > 0].groupby(["Month", "Trading_Day"]).size().reset_index(name="pos_count")
+    stats = pd.merge(stats, pos_counts, on=["Month", "Trading_Day"], how="left")
     stats["pos_count"] = stats["pos_count"].fillna(0)
     stats["pos_pct"] = (stats["pos_count"] / stats["count"] * 100).round(1)
+
+    # Calculate negative counts and percentage
+    neg_counts = data[data["Daily_Return"] < 0].groupby(["Month", "Trading_Day"]).size().reset_index(name="neg_count")
+    stats = pd.merge(stats, neg_counts, on=["Month", "Trading_Day"], how="left")
+    stats["neg_count"] = stats["neg_count"].fillna(0)
+    stats["neg_pct"] = (stats["neg_count"] / stats["count"] * 100).round(1)
+
     return stats
 
-def generate_calendar_data(seasonality, year, month):
-    num_days = calendar.monthrange(year, month)[1]
-    start_date = datetime.date(year, month, 1)
+def generate_calendar_data(seasonality, month):
+    month_data = seasonality[seasonality["Month"] == month]
+    if month_data.empty:
+        max_trading_day = 0
+    else:
+        max_trading_day = int(month_data["Trading_Day"].max())
     calendar_list = []
-    for day in range(1, num_days + 1):
-        current_date = datetime.date(year, month, day)
-        weekday = current_date.weekday()  # Monday=0 ... Sunday=6
-        row = seasonality[(seasonality["Month"] == month) & (seasonality["Day"] == day)]
+    for td in range(1, max_trading_day + 1):
+        row = month_data[month_data["Trading_Day"] == td]
         if not row.empty:
-            avg_return = row["mean"].values[0]
+            median = row["median"].values[0]
             pos_pct = row["pos_pct"].values[0]
+            neg_pct = row["neg_pct"].values[0]
             sample_size = int(row["count"].values[0])
         else:
-            avg_return = np.nan
+            median = np.nan
             pos_pct = np.nan
+            neg_pct = np.nan
             sample_size = 0
         calendar_list.append({
-            "date": current_date,
-            "day": day,
-            "weekday": weekday,
-            "avg_return": avg_return,
+            "trading_day": td,
+            "median": median,
             "pos_pct": pos_pct,
+            "neg_pct": neg_pct,
             "sample_size": sample_size
         })
     return calendar_list
 
-def create_calendar_layout(year, month, seasonality_df, min_sample=10):
-    cal_data = generate_calendar_data(seasonality_df, year, month)
-    first_weekday = datetime.date(year, month, 1).weekday()
-    # Sunday as first column => offset
-    first_day_offset = (first_weekday + 1) % 7
+def create_calendar_layout(year, month, seasonality_df, min_sample=10, columns=5):
+    # Generate trading day data for the month
+    cal_data = generate_calendar_data(seasonality_df, month)
 
-    weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    header = html.Tr([html.Th(day, className="text-center") for day in weekdays])
+    # Create header row with trading day labels
+    header = html.Tr([html.Th(f"TD {i+1}", className="text-center custom-table-header") for i in range(columns)])
     rows = [header]
 
-    day_idx = 0
-    weeks = 6
-    for _ in range(weeks):
-        cells = []
-        for day in range(7):
-            if _ == 0 and day < first_day_offset:
-                cells.append(html.Td("", className="p-2"))
-            elif day_idx < len(cal_data):
-                day_info = cal_data[day_idx]
-                day_idx += 1
-                if day_info["sample_size"] < min_sample or np.isnan(day_info["pos_pct"]):
-                    bg = "#f8f9fa"
-                    text_color = "text-muted"
+    cells = []
+    for day_info in cal_data:
+        if day_info["sample_size"] < min_sample or np.isnan(day_info["pos_pct"]):
+            bg = "#1a1a1a"  # Insufficient data: dark background
+            text_color = "text-muted"
+        else:
+            median = day_info["median"]
+            pos_pct = day_info["pos_pct"]
+            neg_pct = day_info["neg_pct"]
+            # If median is positive, use green shades
+            if median >= 0:
+                if pos_pct >= 70:
+                    bg = "#36ff00"  # Bright green
+                elif pos_pct >= 60:
+                    bg = "#70d800"  # Moderately bright green
                 else:
-                    pos = day_info["pos_pct"]
-                    if pos >= 70:
-                        bg = "#00cc00"
-                    elif pos >= 60:
-                        bg = "#99ff99"
-                    elif pos >= 40:
-                        bg = "#f2f2f2"
-                    elif pos >= 30:
-                        bg = "#ffcccc"
-                    else:
-                        bg = "#ff6666"
-
-                    if np.isnan(day_info["avg_return"]):
-                        text_color = "text-muted"
-                    elif day_info["avg_return"] > 0:
-                        text_color = "text-success"
-                    else:
-                        text_color = "text-danger"
-
-                cell_content = [
-                    html.Div(day_info["day"], className="fw-bold"),
-                    html.Div(f"{day_info['pos_pct']:.1f}%" if not np.isnan(day_info["pos_pct"]) else "N/A", className="small"),
-                    html.Div(f"{day_info['avg_return']:.2f}%" if not np.isnan(day_info["avg_return"]) else "N/A", className=f"small {text_color}"),
-                    html.Div(f"n={day_info['sample_size']}", className="small text-muted")
-                ]
-                cells.append(html.Td(cell_content, className="p-2 text-center", style={"backgroundColor": bg}))
+                    bg = "#333333"  # Neutral dark gray for middling bullish probability
+                text_color = "text-success"
+            # If median is negative, use red shades
             else:
-                cells.append(html.Td("", className="p-2"))
-        rows.append(html.Tr(cells))
+                if neg_pct >= 70:
+                    bg = "#ff0000"  # Bright red
+                    text_color = "text-danger"
+                elif neg_pct >= 60:
+                    bg = "#ff6666"  # Moderately bright red
+                    text_color = "text-danger"
+                else:
+                    bg = "#333333"  # Neutral dark gray for low bearish probability
+                    text_color = "text-muted"
 
-    table = dbc.Table(rows, bordered=True, hover=True, responsive=True, striped=True)
-    header_title = html.H3(f"{calendar.month_name[month]} {year} - SPY Seasonality", className="text-center my-3 fw-bold")
+        cell_content = [
+            html.Div(f"TD {day_info['trading_day']}", className="fw-bold custom-day-number"),
+            html.Div(
+                f"{day_info['pos_pct']:.1f}%" if day_info["median"] >= 0 else f"{day_info['neg_pct']:.1f}%",
+                className="small custom-cell-text"
+            ) if not np.isnan(day_info["median"]) else html.Div("N/A", className="small custom-cell-text"),
+            html.Div(f"{day_info['median']:.2f}%" if not np.isnan(day_info.get("median", np.nan)) else "N/A", className=f"small {text_color} custom-cell-text"),
+            html.Div(f"n={day_info['sample_size']}", className="small text-muted custom-cell-text")
+        ]
+        cell = html.Td(cell_content, className="p-2 text-center", style={"backgroundColor": bg})
+        cells.append(cell)
+
+    # Group cells into rows with the specified number of columns
+    cell_rows = [html.Tr(cells[i:i+columns]) for i in range(0, len(cells), columns)]
+    rows.extend(cell_rows)
+
+    table = dbc.Table(rows, bordered=True, hover=True, responsive=True, striped=True, className="custom-table")
+    header_title = html.H3(f"{calendar.month_name[month]} Trading Days - SPY Seasonality", className="text-center my-3 fw-bold custom-table-header")
     return html.Div([header_title, table])
+
+# -----------------------------
+# Layout Definition
+# -----------------------------
 
 layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("Calendar Navigation", className="fw-bold text-white bg-primary"),
+                dbc.CardHeader("Calendar Navigation", className="fw-bold text-white custom-card-header"),
                 dbc.CardBody([
-                    dbc.Button("Previous Month", id="prev-month", color="secondary", className="me-2"),
-                    dbc.Button("Next Month", id="next-month", color="secondary"),
-                    html.Div(id="current-date-display", className="mt-3 text-center"),
+                    dbc.Button("Previous Month", id="prev-month", color="warning", className="me-2 custom-button"),
+                    dbc.Button("Next Month", id="next-month", color="warning", className="custom-button"),
+                    html.Div(id="current-date-display", className="mt-3 text-center custom-text"),
 
-                    html.Label("Year Range:", className="mt-3 fw-bold"),
+                    html.Label("Year Range:", className="mt-3 fw-bold custom-text"),
                     dcc.RangeSlider(
                         id="year-range-slider",
                         min=2000,
@@ -141,9 +168,9 @@ layout = dbc.Container([
                         marks={i: str(i) for i in range(2000, 2025, 5)},
                         value=[2010, 2024]
                     ),
-                    html.Div(id="year-range-display", className="mt-2"),
+                    html.Div(id="year-range-display", className="mt-2 custom-text"),
 
-                    html.Label("Minimum Sample Size:", className="mt-3 fw-bold"),
+                    html.Label("Minimum Sample Size:", className="mt-3 fw-bold custom-text"),
                     dcc.Slider(
                         id="min-sample-slider",
                         min=5,
@@ -152,54 +179,56 @@ layout = dbc.Container([
                         marks={i: str(i) for i in [5, 10, 15, 20]},
                         value=10
                     ),
-                    html.Div(id="sample-size-display", className="mt-2"),
+                    html.Div(id="sample-size-display", className="mt-2 custom-text"),
 
-                    dbc.Button("Apply Filters", id="apply-filters", color="success", className="w-100 mt-3 fw-bold"),
+                    dbc.Button("Apply Filters", id="apply-filters", color="warning", className="w-100 mt-3 fw-bold custom-button"),
                 ])
-            ], className="mb-4 shadow-sm"),
+            ], className="mb-4 shadow-sm custom-card"),
         ], width=3),
 
         dbc.Col([
-            dbc.Spinner(html.Div(id="calendar-container", className="p-3"), color="primary")
+            dbc.Spinner(html.Div(id="calendar-container", className="p-3"), color="warning")
         ], width=9)
     ]),
 
-    dcc.Store(id="seasonality-data"),
     dcc.Store(id="current-date", data={"year": datetime.datetime.now().year, "month": datetime.datetime.now().month}),
+    dcc.Store(id="seasonality-data", data=[]),
+    dcc.Interval(
+        id="initial-load",
+        interval=1*1000,  # fires once after 1 second
+        n_intervals=0,
+        max_intervals=1
+    ),
+
 
     html.Hr(),
     html.Footer([
-        html.P("SPY Seasonality Calendar © 2025", className="text-center mb-0"),
-        html.P("Data source: Yahoo Finance via yfinance", className="text-center mb-0"),
-        html.P("Excludes major correction periods (>15% drops in 30 days)", className="text-center"),
-    ], className="my-3"),
+        html.P("SPY Seasonality Calendar © 2025", className="text-center mb-0 custom-text"),
+        html.P("Data source: Yahoo Finance via yfinance", className="text-center mb-0 custom-text"),
+        html.P("Excludes entire month if a correction (<-15%) is detected", className="text-center custom-text"),
+    ], className="my-3")
 ], fluid=True)
 
+# -----------------------------
+# Callbacks
+# -----------------------------
 from dash.dependencies import Input, Output, State
 
 @dash.callback(
     Output("seasonality-data", "data"),
-    Input("apply-filters", "n_clicks"),
-    State("year-range-slider", "value"),
-    State("min-sample-slider", "value"),
-    State("current-date", "data"),
+    [Input("apply-filters", "n_clicks"),
+     Input("initial-load", "n_intervals")],
+    [State("year-range-slider", "value"),
+     State("min-sample-slider", "value"),
+     State("current-date", "data")],
     prevent_initial_call=False
 )
-def update_seasonality(n_clicks, year_range, min_sample, current_date):
+def update_seasonality(n_clicks, n_intervals, year_range, min_sample, current_date):
     start_date = f"{year_range[0]}-01-01"
     spy_data = get_spy_data(start_date)
     filtered = filter_correction_periods(spy_data)
     seasonality = calculate_seasonality(filtered)
     return seasonality.to_dict("records")
-
-def initialize_data(n_clicks, year_range, min_sample, current_date):
-    start_date = f"{year_range[0]}-01-01"
-    spy_data = get_spy_data(start_date)
-    filtered = filter_correction_periods(spy_data)
-    seasonality = calculate_seasonality(filtered)
-    seasonality_json = seasonality.to_dict("records")
-    cal_layout = create_calendar_layout(current_date["year"], current_date["month"], seasonality, min_sample)
-    return seasonality_json, cal_layout
 
 @dash.callback(
     Output("calendar-container", "children"),
@@ -211,12 +240,10 @@ def initialize_data(n_clicks, year_range, min_sample, current_date):
 def update_calendar(current_date, min_sample, seasonality_json):
     if not seasonality_json:
         return html.Div("No seasonality data available."), ""
-
     seasonality = pd.DataFrame(seasonality_json)
     cal_layout = create_calendar_layout(current_date["year"], current_date["month"], seasonality, min_sample)
-    date_str = f"Viewing: {calendar.month_name[current_date['month']]} {current_date['year']}"
+    date_str = f"Viewing: Month {current_date['month']} of {current_date['year']}"
     return cal_layout, date_str
-
 
 @dash.callback(
     Output("year-range-display", "children"),

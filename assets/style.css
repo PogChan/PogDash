@@ -1,38 +1,75 @@
 /* assets/style.css */
 
-/* Global page background */
+/* Overall page background and text styling */
 body {
-  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-  font-family: 'Open Sans', sans-serif;
+    background-color: #000;
+    color: #ffd477;
+    font-family: 'Open Sans', sans-serif;
 }
 
-/* Navbar brand style */
-.navbar-brand {
-  font-size: 1.8rem !important;
-  font-weight: 800 !important;
+/* Navbar brand and links */
+.custom-brand, .navbar-brand {
+    color: #ffd477 !important;
+}
+.nav-link {
+    color: #ffd477 !important;
+}
+.nav-link.active {
+    border-bottom: 2px solid #ffd477;
 }
 
-/* Hero section styling (on home page) */
+/* Hero section styling (for the home page) */
 .hero-section {
-  background: #fff;
-  border-radius: 8px;
+    background-color: #1a1a1a;
+    border-radius: 8px;
 }
 
-/* Card hover effect */
-.card:hover {
-  transform: translateY(-3px);
-  transition: 0.2s ease-in-out;
+/* Custom titles and text */
+.custom-title, .custom-text {
+    color: #ffd477;
 }
 
-/* Adjust table cells a bit */
-table td, table th {
-  vertical-align: middle;
+/* Custom button styling */
+.custom-button {
+    background-color: #ffd477 !important;
+    border-color: #ffd477 !important;
+    color: #000 !important;
+}
+.custom-button:hover {
+    background-color: #e6c05b !important;
+    border-color: #e6c05b !important;
+    color: #000 !important;
 }
 
-/* Example text styles */
-.text-primary {
-  color: #2d8fd5 !important;
+/* Card headers and cards */
+.custom-card-header {
+    background-color: #000;
+    border-bottom: 1px solid #ffd477;
 }
-.text-info {
-  color: #17a2b8 !important;
+.custom-card {
+    background-color: #1a1a1a;
+    border: 1px solid #ffd477;
+    color: #ffd477;
+}
+
+/* Table header and cell text */
+.custom-table-header {
+    background-color: #000;
+    color: #ffd477;
+}
+.custom-table td, .custom-table th {
+    color: #ffd477;
+}
+
+/* Footer styling */
+footer, footer p {
+    color: #ffd477;
+}
+
+/* Additional tweaks for calendar cells */
+.custom-day-number {
+    font-size: 1.2rem;
+}
+.custom-cell-text {
+    font-size: 0.8rem;
 }
