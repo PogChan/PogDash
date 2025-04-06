@@ -7,7 +7,18 @@ import yfinance as yf
 import datetime
 import calendar
 from dateutil.relativedelta import relativedelta
-import calendar
+import logging
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger('spy_calendar')
 
 dash.register_page(__name__, path="/calendar", name="Calendar")
 
@@ -16,25 +27,53 @@ dash.register_page(__name__, path="/calendar", name="Calendar")
 # -----------------------------
 
 def get_spy_data(start_date="2000-01-01"):
+    logger.info(f"Fetching SPY data from {start_date}")
     data = yf.download("SPY", start=start_date)
     # Calculate daily returns using the unadjusted "Close"
     data["Daily_Return"] = data["Close"].pct_change() * 100
+    logger.info(f"Retrieved {len(data)} days of SPY data")
     return data
 
 def filter_correction_periods(data, threshold=-15):
-    """
-    For each year-month group, if the minimum rolling 30-day return
-    in that month is below the threshold, exclude that entire month.
-    """
+    # Calculate rolling 30-day return (in %)
     data["Rolling_30_Return"] = data["Close"].pct_change(30) * 100
 
-    def filter_month(group):
-        if group["Rolling_30_Return"].min() < threshold:
-            return pd.DataFrame()  # drop the whole month
-        return group
+    # Identify dates where the rolling 30-day return is below the threshold
+    bad_dates = data.index[data["Rolling_30_Return"] < threshold]
 
-    filtered = data.groupby([data.index.year, data.index.month], group_keys=False).apply(filter_month)
-    return filtered
+    # For each bad date, define an interval: [bad_date - 29 days, bad_date]
+    intervals = []
+    for bad_date in bad_dates:
+        start = bad_date - pd.Timedelta(days=29)
+        end = bad_date
+        intervals.append((start, end))
+
+    # If no intervals, return the data as is
+    if not intervals:
+        return data
+
+    # Sort intervals by start date
+    intervals.sort(key=lambda x: x[0])
+
+    # Merge overlapping intervals
+    merged = []
+    current_start, current_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= current_end:  # There is overlap
+            current_end = max(current_end, end)
+        else:
+            merged.append((current_start, current_end))
+            current_start, current_end = start, end
+    merged.append((current_start, current_end))
+
+    # Create a boolean mask that marks all dates within any merged interval for removal
+    mask = pd.Series(False, index=data.index)
+    for start, end in merged:
+        mask |= (data.index >= start) & (data.index <= end)
+
+    # Return data with those intervals dropped
+    return data[~mask]
+
 
 def calculate_seasonality(data):
     data = data.copy()
@@ -57,14 +96,19 @@ def calculate_seasonality(data):
     stats["neg_count"] = stats["neg_count"].fillna(0)
     stats["neg_pct"] = (stats["neg_count"] / stats["count"] * 100).round(1)
 
+    logger.info(f"Calculated seasonality stats with {len(stats)} unique month/trading day combinations")
     return stats
 
 def generate_calendar_data(seasonality, month):
+    logger.info(f"Generating calendar data for month {month}")
     month_data = seasonality[seasonality["Month"] == month]
     if month_data.empty:
+        logger.warning(f"No data available for month {month}")
         max_trading_day = 0
     else:
         max_trading_day = int(month_data["Trading_Day"].max())
+        logger.info(f"Month {month} has {max_trading_day} trading days")
+
     calendar_list = []
     for td in range(1, max_trading_day + 1):
         row = month_data[month_data["Trading_Day"] == td]
@@ -88,6 +132,7 @@ def generate_calendar_data(seasonality, month):
     return calendar_list
 
 def create_calendar_layout(year, month, seasonality_df, min_sample=10, columns=5):
+    logger.info(f"Creating calendar layout for {calendar.month_name[month]} {year}")
     # Generate trading day data for the month
     cal_data = generate_calendar_data(seasonality_df, month)
 
@@ -187,19 +232,29 @@ layout = dbc.Container([
         ], width=3),
 
         dbc.Col([
+            dbc.Alert(
+                "Loading data...",
+                id="loading-alert",
+                color="info",
+                className="mb-3",
+                is_open=True
+            ),
             dbc.Spinner(html.Div(id="calendar-container", className="p-3"), color="warning")
         ], width=9)
     ]),
 
-    dcc.Store(id="current-date", data={"year": datetime.datetime.now().year, "month": datetime.datetime.now().month}),
-    dcc.Store(id="seasonality-data", data=[]),
+    # Use a simple interval for initial load
     dcc.Interval(
-        id="initial-load",
-        interval=1*1000,  # fires once after 1 second
+        id="initial-load-interval",
+        interval=1000,  # 1 second
         n_intervals=0,
         max_intervals=1
     ),
 
+    # Store components
+    dcc.Store(id="current-date", data={"year": datetime.datetime.now().year, "month": datetime.datetime.now().month}),
+    dcc.Store(id="seasonality-data", data=None),
+    dcc.Store(id="load-state", data="initializing"),
 
     html.Hr(),
     html.Footer([
@@ -215,35 +270,69 @@ layout = dbc.Container([
 from dash.dependencies import Input, Output, State
 
 @dash.callback(
-    Output("seasonality-data", "data"),
-    [Input("apply-filters", "n_clicks"),
-     Input("initial-load", "n_intervals")],
-    [State("year-range-slider", "value"),
-     State("min-sample-slider", "value"),
-     State("current-date", "data")],
-    prevent_initial_call=False
+    Output("load-state", "data"),
+    Input("initial-load-interval", "n_intervals"),
+    prevent_initial_call=True
 )
-def update_seasonality(n_clicks, n_intervals, year_range, min_sample, current_date):
-    start_date = f"{year_range[0]}-01-01"
-    spy_data = get_spy_data(start_date)
-    filtered = filter_correction_periods(spy_data)
-    seasonality = calculate_seasonality(filtered)
-    return seasonality.to_dict("records")
+def initialize_data(n_intervals):
+    logger.info("Initial load interval triggered")
+    return "ready"
+
+@dash.callback(
+    [Output("seasonality-data", "data"),
+     Output("loading-alert", "is_open"),
+     Output("loading-alert", "children")],
+    [Input("apply-filters", "n_clicks"),
+     Input("load-state", "data")],
+    [State("year-range-slider", "value"),
+     State("min-sample-slider", "value")]
+)
+def update_seasonality(n_clicks, load_state, year_range, min_sample):
+    trigger = dash.callback_context.triggered[0]["prop_id"]
+    logger.info(f"update_seasonality called with trigger: {trigger}")
+
+    if load_state != "ready" and "load-state" not in trigger:
+        logger.info("Waiting for app to be ready")
+        return [], True, "Initializing application..."
+
+    try:
+        logger.info(f"Processing data with year range: {year_range}, min_sample: {min_sample}")
+        start_date = f"{year_range[0]}-01-01"
+        spy_data = get_spy_data(start_date)
+        filtered = filter_correction_periods(spy_data)
+        seasonality = calculate_seasonality(filtered)
+        result = seasonality.to_dict("records")
+        logger.info(f"Successfully processed {len(result)} seasonality records")
+        return result, False, "Data loaded successfully!"
+    except Exception as e:
+        logger.error(f"Error processing data: {str(e)}", exc_info=True)
+        return [], True, f"Error loading data: {str(e)}"
 
 @dash.callback(
     Output("calendar-container", "children"),
     Output("current-date-display", "children"),
     Input("current-date", "data"),
     Input("min-sample-slider", "value"),
-    State("seasonality-data", "data")
+    Input("seasonality-data", "data")
 )
 def update_calendar(current_date, min_sample, seasonality_json):
+    trigger = dash.callback_context.triggered[0]["prop_id"]
+    logger.info(f"update_calendar called with trigger: {trigger}")
+
     if not seasonality_json:
-        return html.Div("No seasonality data available."), ""
-    seasonality = pd.DataFrame(seasonality_json)
-    cal_layout = create_calendar_layout(current_date["year"], current_date["month"], seasonality, min_sample)
-    date_str = f"Viewing: Month {current_date['month']} of {current_date['year']}"
-    return cal_layout, date_str
+        logger.warning("No seasonality data available")
+        return html.Div(html.H4("No seasonality data available. Please click 'Apply Filters' to load data.",
+                              className="text-center text-warning my-5")), ""
+
+    try:
+        seasonality = pd.DataFrame(seasonality_json)
+        logger.info(f"Creating calendar for {current_date['month']}/{current_date['year']} with {len(seasonality)} records")
+        cal_layout = create_calendar_layout(current_date["year"], current_date["month"], seasonality, min_sample)
+        date_str = f"Viewing: {calendar.month_name[current_date['month']]} {current_date['year']}"
+        return cal_layout, date_str
+    except Exception as e:
+        logger.error(f"Error updating calendar: {str(e)}", exc_info=True)
+        return html.Div(f"Error creating calendar: {str(e)}"), ""
 
 @dash.callback(
     Output("year-range-display", "children"),
@@ -267,6 +356,7 @@ def update_sample_size_display(min_sample):
 )
 def previous_month(n_clicks, current_date):
     if n_clicks:
+        logger.info(f"Moving to previous month from {current_date['month']}/{current_date['year']}")
         current = datetime.date(current_date["year"], current_date["month"], 1)
         prev_mon = current - relativedelta(months=1)
         return {"year": prev_mon.year, "month": prev_mon.month}
@@ -280,6 +370,7 @@ def previous_month(n_clicks, current_date):
 )
 def next_month(n_clicks, current_date):
     if n_clicks:
+        logger.info(f"Moving to next month from {current_date['month']}/{current_date['year']}")
         current = datetime.date(current_date["year"], current_date["month"], 1)
         next_mon = current + relativedelta(months=1)
         return {"year": next_mon.year, "month": next_mon.month}
